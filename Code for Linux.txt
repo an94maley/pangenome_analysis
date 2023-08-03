@@ -1,0 +1,110 @@
+# "pinfo", "Script", "Raw_data", and "REF" files were created to store sample list (Samples.txt), script, raw sequencing data, and reference genome (H37Rv), respectively
+mkdir {pinfo,Script,Raw_data}
+
+
+
+# quality control and trimming
+cat ./pinfo/Samples.txt | xargs -I {} -n 1 -P 10 sh -c "./Script/QC_trim.sh {}"
+
+
+
+# remove PCR duplicates and correct read errors
+gzip -d ./Clean_data/*.gz
+mkdir Data_PCRrm
+sh ./Script/rm_PCRdup.sh
+gzip ./Data_PCRrm/*
+
+mkdir -p SPAdes/corrected_reads
+sh ./Script/read_correct.sh
+
+
+
+# calculate the best k-mer value for read assembly and estimate genome size
+mkdir -p kmergenie/result
+ls ./SPAdes/corrected_reads/*.fastq.gz > ./kmergenie/fastq.list
+kmergenie ./kmergenie/fastq.list -l 15 -k 105 -s 10 -t 50 -o ./kmergenie/result/mtb
+
+
+
+# de novo assembly
+mkdir -p SPAdes/assembly
+sh ./Script/read_assembly.sh
+
+
+
+# base correction and assembly polishing
+sh ./Script/pilon.sh
+
+
+
+# evaluate the genome assembly quality
+mkdir -p QUAST/result
+quast.py ./Pilon/*fasta -R ./REF/ref.fasta  -G ./REF/ref.gff -t 70 -o ./QUAST/result
+
+
+
+# annotate assembled genomes
+sh ./Script/prokka.sh
+
+
+
+# pan-genome construction
+mkdir -p get_homologues/seq
+cd get_homologues
+for each in `cat ../pinfo/Samples.txt`
+do
+cp ../Prokka/${each}/${each}.gbk ./seq/
+done
+get_homologues.pl -d ./seq -n 70 -c -S 90 -C 75 -E 1e-05
+get_homologues.pl -d ./seq -n 70 -c -S 90 -C 75 -G -E 1e-05 -z
+get_homologues.pl -d ./seq -n 70 -c -S 90 -C 75 -M -E 1e-05 -z
+
+
+
+# get the intersection between the three cluster sets (Supplementary Figure S1)
+mkdir sample_intersection
+compare_clusters.pl -o sample_intersection -d \
+seq_homologues/A62_f0_alltaxa_algBDBH_e0_E1e-05_C75_S90_,\
+seq_homologues/A62_f0_alltaxa_algCOG_e0_E1e-05_C75_S90_,\
+seq_homologues/A62_f0_alltaxa_algOMCL_e0_E1e-05_C75_S90_
+
+
+
+# estimate core/pan-genome size (Figure 4)
+plot_pancore_matrix.pl -i seq_homologues/core_genome_algBDBH_E1e-05_C75_S90.tab -f core_Tettelin -F 1
+plot_pancore_matrix.pl -i seq_homologues/pan_genome_algBDBH_E1e-05_C75_S90.tab -f pan -F 1
+
+
+
+# obtain a pan-genome matrix and Supplementary Figure S2
+get_homologues.pl -d ./seq -n 70 -t 0 -G
+get_homologues.pl -d ./seq -n 70 -t 0 -M
+compare_clusters.pl -o sample_intersection -m -T -d \
+seq_homologues/A62_f0_0taxa_algCOG_e0_,\
+seq_homologues/A62_f0_0taxa_algOMCL_e0_
+
+
+
+# classify pan-genome into cloud, shell, and soft-core genome
+parse_pangenome_matrix.pl -m sample_intersection/pangenome_matrix_t0.tab -s
+
+
+
+# construct pan-genome phylogeny (Figure 5)
+estimate_pangenome_phylogenies.sh -f pangenome_matrix_t0.fasta -r 10 -S UFBoot
+
+
+
+# calculate average nuleutide identity (ANI)
+mkdir -p ../pyani; cd ../pyani
+mkdir {seq,result}
+for each in `cat ../pinfo/Samples.txt`
+do
+cp ../Pilon/*fasta ./seq
+done
+average_nucleotide_identity.py -i ./seq -o ./result -m ANIm -g --gformat pdf -f
+
+
+
+# pan-genome association study
+scoary -g pangenome_matrix_t0.tr.csv -t traits.csv -n best_PGM_IQT_UFBoot_run5_GTR2+FO+R3.treefile -c BH --threads 50 -o ./
